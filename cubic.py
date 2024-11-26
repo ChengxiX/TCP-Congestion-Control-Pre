@@ -2,12 +2,18 @@ import time
 import random
 import matplotlib.pyplot as plt
 from network import TCPConnection, TCPPacket
+import numpy as np
 
-class TCPRenoConnection(TCPConnection):
+class TCPCubicConnection(TCPConnection):
     def __init__(self, name, rtt=0.15, max_packets=100, jitter=0.001, loss_rate=0.001):
         super().__init__(name, rtt, max_packets, jitter, loss_rate)
         self.cwnd = 1.0
-        self.ssthresh = 64
+        self.w_max = 0  # Window size before reduction
+        self.w_last_max = 0  # Last Wmax for fast convergence
+        self.k = 0  # Time period since last congestion
+        self.t = 0  # Time since last congestion
+        self.beta = 0.7  # CUBIC beta
+        self.C = 0.4  # CUBIC scaling factor
         self.dupacks = 0
         self.time = 0
         self.times = []
@@ -15,6 +21,12 @@ class TCPRenoConnection(TCPConnection):
         self.throughput = []
         self.bytes_sent = 0
         self.loss_events = []
+
+    def cubic_update(self):
+        # CUBIC window calculation
+        self.t = (self.time - self.k)
+        w_cubic = self.C * (self.t - self.k)**3 + self.w_max
+        return max(w_cubic, 2)
 
     def send_data(self, data, peer):
         while self.sent_packets < self.max_packets:
@@ -45,18 +57,20 @@ class TCPRenoConnection(TCPConnection):
         return random.random() < self.loss_rate
 
     def _handle_loss(self):
-        self.ssthresh = max(self.cwnd / 2, 2)
-        self.cwnd = 1
-        self.dupacks = 0
+        # Fast convergence
+        if self.w_max < self.w_last_max:
+            self.w_last_max = self.w_max
+            self.w_max = self.w_max * (2 - self.beta) / 2
+        else:
+            self.w_last_max = self.w_max
+            
+        self.w_max = self.cwnd
+        self.cwnd = self.cwnd * self.beta
+        self.k = np.cbrt(self.w_max * (1 - self.beta) / self.C)
         self.loss_events.append(self.time)
 
     def _handle_success(self):
-        if self.cwnd < self.ssthresh:
-            # Slow start
-            self.cwnd *= 2
-        else:
-            # Congestion avoidance
-            self.cwnd += 1.0 / self.cwnd
+        self.cwnd = self.cubic_update()
 
     def plot_metrics(self):
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
@@ -65,10 +79,8 @@ class TCPRenoConnection(TCPConnection):
         ax1.plot(self.times, self.cwnds)
         ax1.set_xlabel('Time (s)')
         ax1.set_ylabel('Congestion Window (packets)')
-        ax1.set_title('TCP Reno Congestion Window')
+        ax1.set_title('TCP CUBIC Congestion Window')
         
-        y_max1 = max(self.cwnds)
-        y_max2 = max(self.throughput)
         for loss_time in self.loss_events:
             ax1.axvline(x=loss_time, color='red', alpha=0.3, linestyle='--')
             ax2.axvline(x=loss_time, color='red', alpha=0.3, linestyle='--')
@@ -84,20 +96,20 @@ class TCPRenoConnection(TCPConnection):
         plt.tight_layout()
         plt.show()
 
-def simulate_reno():
-    client = TCPRenoConnection('Client', rtt=0.15, loss_rate=0.02, max_packets=10000)
-    server = TCPConnection('Server')
+def simulate_cubic():
+    client = TCPCubicConnection('Client', rtt=0.15, loss_rate=0.02, max_packets=10000)
+    server = TCPConnection('Server')        
     
     # Establish connection
     syn = TCPPacket(seq=0, syn=True)
     client.send(syn, server)
-    
+        
     # Send data
     data = "X" * 1000  # 1KB of data
     client.send_data(data, server)
-    
+        
     # Plot results
     client.plot_metrics()
 
 if __name__ == "__main__":
-    simulate_reno()
+    simulate_cubic()

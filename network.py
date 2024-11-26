@@ -34,15 +34,14 @@ class TCPConnection:
         if self.sent_packets >= self.max_packets:
             return
         if random.random() < self.loss_rate:
-            print(f"{self.name}: Packet lost: {packet}")
+            # print(f"{self.name}: Packet lost;")
             return
-        print(f"{self.name} sending: {packet}")
+        # print(f"{self.name} sending;")
         self.sent_packets += 1
-        time.sleep(self.rtt + random.uniform(-self.jitter, self.jitter))
         peer.receive(packet, self)
 
     def receive(self, packet, peer):
-        print(f"{self.name} received: {packet}")
+        # print(f"{self.name} received;")
         # Basic TCP state machine
         if packet.syn and not packet.ack_flag:
             self._handle_syn(packet, peer)
