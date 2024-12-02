@@ -1,186 +1,90 @@
-import time
-import random
 import matplotlib.pyplot as plt
-from network import TCPConnection, TCPPacket
-from enum import Enum
-
-class BBRState(Enum):
-    STARTUP = 1
-    DRAIN = 2
-    PROBE_BW = 3
-    PROBE_RTT = 4
-
-class TCPBBRConnection(TCPConnection):
-    def __init__(self, name, rtt=0.15, max_packets=100, jitter=0.001, loss_rate=0.001):
-        super().__init__(name, rtt, max_packets, jitter, loss_rate)
-        # BBR state variables
-        self.state = BBRState.STARTUP
-        self.min_rtt = float('inf')
-        self.max_bw = 0.0
-        self.round_count = 0
-        self.next_send_time = 0
-        self.pacing_rate = float('inf')
-        self.max_pacing_rate = 1000000  # 1M packets per second as a reasonable limit
-        self.cwnd = 10.0  # Initial window
-        self.probe_rtt_done_stamp = 0
-        self.probe_rtt_min_stamp = 0
-        self.min_rtt_stamp = 0
-        
-        # Metrics for plotting
-        self.time = 0
-        self.times = []
-        self.cwnds = []
-        self.bw_estimates = []
-        self.rtt_estimates = []
-        self.states = []
-        self.bytes_sent = 0
-        self.throughput = []
-
-    def send_data(self, data, peer):
-        while self.sent_packets < self.max_packets:
-            current_time = self.time
-            
-            self._update_bbr_state(current_time)
-            
-            # Add bounds checking for pacing_rate calculation
-            effective_pacing_rate = min(self.pacing_rate, self.max_pacing_rate)
-            max_packets_by_rate = max(1, min(1000, int(effective_pacing_rate * self.rtt)))
-            
-            # Calculate packets to send with bounds
-            packets_to_send = min(
-                int(self.cwnd),
-                max_packets_by_rate,
-                self.max_packets - self.sent_packets
-            )
-            
-            bytes_this_round = 0
-            
-            for _ in range(packets_to_send):
-                if current_time >= self.next_send_time:
-                    packet = TCPPacket(seq=self.seq, data=data)
-                    self.send(packet, peer)
-                    self.seq += len(data)
-                    bytes_this_round += len(data)
-                    self.next_send_time = current_time + (1.0 / effective_pacing_rate)
-            
-            self.time += self.rtt
-            self.bytes_sent += bytes_this_round
-            
-            self._record_metrics()
-            
-            if self._simulate_packet_loss():
-                self._update_bandwidth_rtt(lost=True)
-            else:
-                self._update_bandwidth_rtt()
-
-    def _simulate_packet_loss(self):
-        return random.random() < self.loss_rate
-
-    def _update_bbr_state(self, current_time):
-        if self.state == BBRState.STARTUP:
-            if self.max_bw > 0 and self._bw_decreased():
-                self.state = BBRState.DRAIN
-        
-        elif self.state == BBRState.DRAIN:
-            if self._inflight() <= self._bdp():
-                self.state = BBRState.PROBE_BW
-        
-        elif self.state == BBRState.PROBE_BW:
-            if current_time - self.min_rtt_stamp > 10:
-                self.state = BBRState.PROBE_RTT
-        
-        elif self.state == BBRState.PROBE_RTT:
-            if current_time - self.probe_rtt_done_stamp > self.min_rtt:
-                self.state = BBRState.PROBE_BW
-
-        self._update_pacing_rate()
-
-    def _update_pacing_rate(self):
-        if self.state == BBRState.STARTUP:
-            self.pacing_rate = min(2 * self.max_bw, self.max_pacing_rate)
-        elif self.state == BBRState.DRAIN:
-            self.pacing_rate = min(self.max_bw, self.max_pacing_rate)
-        elif self.state == BBRState.PROBE_BW:
-            self.pacing_rate = min(1.25 * self.max_bw, self.max_pacing_rate)
-        elif self.state == BBRState.PROBE_RTT:
-            self.pacing_rate = min(self.max_bw, self.max_pacing_rate)
-
-    def _update_bandwidth_rtt(self, lost=False):
-        if not lost:
-            delivered_rate = self.bytes_sent / self.time
-            self.max_bw = max(self.max_bw, delivered_rate)
-            self.min_rtt = min(self.min_rtt, self.rtt)
-        self.cwnd = self._get_cwnd()
-
-    def _get_cwnd(self):
-        if self.state == BBRState.STARTUP:
-            return min(2 * self.cwnd, self._bdp() * 2)
-        elif self.state == BBRState.PROBE_RTT:
-            return 4
-        else:
-            return self._bdp()
-
-    def _bdp(self):
-        return self.max_bw * self.min_rtt
-
-    def _bw_decreased(self):
-        return self.max_bw > 0 and self.bytes_sent / self.time < 0.75 * self.max_bw
-
-    def _inflight(self):
-        return self.bytes_sent - self.ack
-
-    def _record_metrics(self):
-        self.times.append(self.time)
-        self.cwnds.append(self.cwnd)
-        self.bw_estimates.append(self.max_bw)
-        self.rtt_estimates.append(self.min_rtt)
-        self.states.append(self.state)
-        self.throughput.append(self.bytes_sent / self.time)
-
-    def plot_metrics(self):
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
-        
-        # Plot congestion window
-        ax1.plot(self.times, self.cwnds)
-        ax1.set_xlabel('Time (s)')
-        ax1.set_ylabel('Congestion Window (packets)')
-        ax1.set_title('BBR Congestion Window')
-        
-        # Plot bandwidth estimates
-        ax2.plot(self.times, self.bw_estimates)
-        ax2.set_xlabel('Time (s)')
-        ax2.set_ylabel('Bandwidth Estimate (bytes/s)')
-        ax2.set_title('BBR Bandwidth Estimates')
-        
-        # Plot RTT estimates
-        ax3.plot(self.times, self.rtt_estimates)
-        ax3.set_xlabel('Time (s)')
-        ax3.set_ylabel('RTT Estimate (s)')
-        ax3.set_title('BBR RTT Estimates')
-        
-        # Plot throughput
-        ax4.plot(self.times, self.throughput)
-        ax4.set_xlabel('Time (s)')
-        ax4.set_ylabel('Throughput (bytes/s)')
-        ax4.set_title('Network Throughput')
-        
-        plt.tight_layout()
-        plt.show()
+import numpy as np
 
 def simulate_bbr():
-    client = TCPBBRConnection('Client', rtt=0.15, loss_rate=0.02, max_packets=10000)
-    server = TCPConnection('Server')
-    
-    # Establish connection
-    syn = TCPPacket(seq=0, syn=True)
-    client.send(syn, server)
-    
-    # Send data
-    data = "X" * 1000  # 1KB of data
-    client.send_data(data, server)
-    
-    # Plot results
-    client.plot_metrics()
+    time_total = 60
+    times = np.linspace(0, time_total, 500)
+    cwnd = []
+    throughput = []
+    loss_events = []
+
+    bandwidth = 1000
+    rtt = 0.1
+    gain = 1.25
+    drain = 0.75
+
+    cwnd_smoothing_factor = 0.05
+    throughput_smoothing_factor = 0.05
+
+    cycle_duration = 1
+    cycle_start_time = 0
+    current_phase = 0  # 0: Startup, 1: Probe BW, 2: Drain, 3: Probe RTT
+
+    for t in times:
+        if t - cycle_start_time >= cycle_duration:
+            cycle_start_time = t
+            current_phase = (current_phase + 1) % 4
+            if current_phase == 0:
+                if np.random.rand() < 0.1:
+                    gain += np.random.uniform(-0.05, 0.05)
+                    drain += np.random.uniform(-0.05, 0.05)
+                    gain = max(1.0, min(gain, 1.5))
+                    drain = max(0.5, min(drain, 0.9))
+
+
+        if current_phase == 0: # Startup
+            target_cwnd = min(2 * len(cwnd) + 1 if len(cwnd) > 0 else 2, 100)
+        elif current_phase == 1:  # Probe bandwidth
+            target_cwnd = int(bandwidth * rtt * gain)
+        elif current_phase == 2: # Drain
+            target_cwnd = int(bandwidth * rtt * drain)
+        elif current_phase == 3: # Probe RTT
+            target_cwnd = int(bandwidth * rtt)
+
+        if len(cwnd) > 0:
+            smoothed_cwnd = cwnd[-1] * (1 - cwnd_smoothing_factor) + target_cwnd * cwnd_smoothing_factor
+            cwnd.append(int(smoothed_cwnd))
+        else:
+            cwnd.append(int(target_cwnd))
+
+        current_throughput = cwnd[-1] / rtt * 1500
+        if len(throughput) > 0:
+            smoothed_throughput = throughput[-1] * (1 - throughput_smoothing_factor) + current_throughput * throughput_smoothing_factor
+            throughput.append(int(smoothed_throughput))
+        else:
+            throughput.append(int(current_throughput))
+
+        if np.random.rand() < 0.01:
+            loss_events.append(t)
+            bandwidth *= 0.8
+
+    return times, cwnd, throughput, loss_events
+
+
+def plot_metrics(times, cwnds, throughput, loss_events):
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+
+    ax1.plot(times, cwnds)
+    ax1.set_xlabel('Time (s)')
+    ax1.set_ylabel('Congestion Window (packets)')
+    ax1.set_title('TCP BBR Congestion Window')
+
+    ax2.plot(times, throughput)
+    ax2.set_xlabel('Time (s)')
+    ax2.set_ylabel('Throughput (bytes/s)')
+    ax2.set_title('Network Throughput')
+
+    for loss_time in loss_events:
+        ax1.axvline(x=loss_time, color='red', alpha=0.3, linestyle='--')
+        ax2.axvline(x=loss_time, color='red', alpha=0.3, linestyle='--')
+
+    ax1.plot([], [], color='red', linestyle='--', label='Packet Loss')
+    ax1.legend()
+
+    plt.tight_layout()
+    plt.show()
+
 
 if __name__ == "__main__":
-    simulate_bbr()
+    times, cwnds, throughput, loss_events = simulate_bbr()
+    plot_metrics(times, cwnds, throughput, loss_events)
